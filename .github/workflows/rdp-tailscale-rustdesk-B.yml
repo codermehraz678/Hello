@@ -1,4 +1,4 @@
-name: RDP + Tailscale + RustDesk + (Optional) Chrome Remote Desktop (B)
+name: RDP + Tailscale + (Optional) Chrome Remote Desktop (B)
 
 on:
   workflow_dispatch:
@@ -7,12 +7,12 @@ on:
       ts_api_key:         { description: "Tailscale API key (device admin, no Bearer)", required: true }
       ts_authkey:         { description: "Tailscale Auth key (reusable or ephemeral)", required: true }
       quick_test:         { description: "Run 5-minute test", type: boolean, default: false }
-      runtime_minutes:    { description: "Runtime (max 360; default 355 when not test)", default: "355" }
+      runtime_minutes:    { description: "Runtime (max 360; default 355)", default: "355" }
       do_purge:           { description: "Purge bullet* devices at start", default: "true" }
       cycles:             { description: "0=stop after this run", default: "0" }
       rdp_count:          { description: "How many RDP instances (1-10)", default: "1" }
-      crd_code:           { description: "Optional CRD code", default: "" }
-      crd_pin:            { description: "CRD PIN", default: "123456" }
+      crd_code:           { description: "Optional Chrome Remote Desktop code", default: "" }
+      crd_pin:            { description: "CRD PIN (6–12 digits)", default: "123456" }
 
 permissions:
   contents: read
@@ -34,8 +34,10 @@ jobs:
           $n = [int]"${{ inputs.rdp_count }}"
           if ($n -lt 1) { $n = 1 }
           if ($n -gt 10) { $n = 10 }
+
           $inc = @()
-          for ($i=1; $i -le $n; $i++){ $inc += @{ id = $i } }
+          for ($i=1; $i -le $n; $i++) { $inc += @{ id = $i } }
+
           $json = @{ include = $inc } | ConvertTo-Json -Compress
           "matrix=$json" | Out-File $env:GITHUB_OUTPUT -Append
           "multi=$([int]($n -gt 1))" | Out-File $env:GITHUB_OUTPUT -Append
@@ -60,8 +62,11 @@ jobs:
 
           $runtime = [int]"${{ inputs.runtime_minutes }}"
           if ("${{ inputs.quick_test }}" -eq "true") { $runtime = 5 }
+          if ($runtime -lt 6) { $runtime = 355 }
           if ($runtime -gt 360) { $runtime = 355 }
+
           "RUNTIME_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
+          Write-Host "Hostname=$hn Runtime=$runtime"
 
       - name: Install + Up Tailscale
         run: |
@@ -70,51 +75,59 @@ jobs:
             Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile ts.msi
             Start-Process msiexec.exe -ArgumentList "/i ts.msi /quiet /norestart" -Wait
           }
-          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME"
+
+          & $ts logout | Out-Null
+          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns --accept-routes
           $ip = & $ts ip -4 | Select-Object -First 1
           "TAILSCALE_IP=$ip" | Out-File -Append $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $ip"
 
-      - name: Enable RDP
+      - name: Enable RDP user + firewall
         run: |
-          $sec = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
-          if (-not (Get-LocalUser $env:RDP_USER -EA SilentlyContinue)) {
-            New-LocalUser $env:RDP_USER -Password $sec
-            Add-LocalGroupMember Administrators $env:RDP_USER
-            Add-LocalGroupMember "Remote Desktop Users" $env:RDP_USER
+          $u = $env:RDP_USER
+          $p = $env:RDP_PASS
+          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $u -EA SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+          } else {
+            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Enable-LocalUser -Name $u
           }
-          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" fDenyTSConnections 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-      - name: Install RustDesk
+          Add-LocalGroupMember -Group Administrators -Member $u -EA SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -EA SilentlyContinue
+
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
+
+          Write-Host "RDP ready: user=$u pass=$p ip=$env:TAILSCALE_IP"
+
+      - name: Optional Chrome Remote Desktop
+        if: ${{ inputs.crd_code != '' }}
         run: |
-          Invoke-WebRequest https://github.com/rustdesk/rustdesk/releases/download/1.3.1/rustdesk-1.3.1-x86_64.msi -OutFile rd.msi
-          Start-Process msiexec.exe -ArgumentList "/i rd.msi /quiet /norestart" -Wait
-
-      - name: Launch RustDesk + Screenshot + Upload (FIXED)
-        run: |
-          Start-Process "C:\Program Files\RustDesk\rustdesk.exe"
-          Start-Sleep 5
-
-          Add-Type -AssemblyName System.Windows.Forms
-          Add-Type -AssemblyName System.Drawing
-          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size)
-          $path = "$env:TEMP\rustdesk.png"
-          $bmp.Save($path,[System.Drawing.Imaging.ImageFormat]::Png)
-          $g.Dispose(); $bmp.Dispose()
-
-          $resp = Invoke-RestMethod -Uri https://store1.gofile.io/uploadFile -Method Post -Form @{ file = Get-Item $path }
-          if ($resp.status -eq "ok") {
-            "SCREENSHOT_URL=$($resp.data.downloadPage)" | Out-File -Append $env:GITHUB_ENV
-            Write-Host "RustDesk Screenshot: $($resp.data.downloadPage)"
+          $exe = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          if (-not (Test-Path $exe)) {
+            Invoke-WebRequest https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi -OutFile crd.msi
+            Start-Process msiexec.exe -ArgumentList "/i crd.msi /quiet /norestart" -Wait
           }
+
+          $pin = "${{ inputs.crd_pin }}"
+          if ($pin -notmatch '^\d{6,12}$') { throw "CRD PIN must be 6–12 digits" }
+
+          $raw = "${{ inputs.crd_code }}"
+          if ($raw -match '--code\s*=\s*"?([^"\s]+)') {
+            $code = $Matches[1]
+          } else {
+            $code = $raw
+          }
+
+          & $exe --code="$code" --redirect-url="https://remotedesktop.google.com/_/oauthredirect" --name="$env:COMPUTERNAME" --pin="$pin"
 
       - name: Keep alive
         run: |
           $end = (Get-Date).AddMinutes([int]$env:RUNTIME_MINUTES)
           while ((Get-Date) -lt $end) {
-            Write-Host "Alive $(Get-Date) | IP=$env:TAILSCALE_IP | Shot=$env:SCREENSHOT_URL"
+            Write-Host "Alive $(Get-Date) | RDP @ $env:TAILSCALE_IP"
             Start-Sleep 60
           }
