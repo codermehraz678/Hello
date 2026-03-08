@@ -1,4 +1,4 @@
-name: RDP + Tailscale + (Optional) Chrome Remote Desktop (B)
+name: RDP OPTIMIMIZED GLRM
 
 on:
   workflow_dispatch:
