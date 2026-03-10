@@ -1,0 +1,291 @@
+name: RDP + Tailscale + Dev Environment (Ubuntu)
+
+on:
+  workflow_dispatch:
+    inputs:
+      hostname:
+        description: "Hostname for this RDP instance (e.g. myserver, dev-machine)"
+        required: true
+        default: "bullet"
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+      ts_api_key:
+        description: "Tailscale API key (device admin, no Bearer)"
+        required: true
+      ts_authkey:
+        description: "Tailscale Auth key (reusable or ephemeral)"
+        required: true
+      quick_test:
+        description: "Run 5-minute test"
+        type: boolean
+        default: false
+      runtime_minutes:
+        description: "Runtime (max 360; default 355)"
+        default: "355"
+      do_purge:
+        description: "Purge matching hostname devices at start"
+        default: "true"
+      rdp_count:
+        description: "How many RDP instances (1-10)"
+        default: "1"
+      rdp_username:
+        description: "RDP Username (default: bulletuser)"
+        default: "bulletuser"
+      rdp_password:
+        description: "RDP Password (default: Bullet@12345)"
+        default: "Bullet@12345"
+      bonsai_api_key:
+        description: "Bonsai API Key (optional, for Claude Code)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+    steps:
+      - name: Generate matrix
+        id: mk
+        run: |
+          n=${{ inputs.rdp_count }}
+          if [ "$n" -lt 1 ]; then n=1; fi
+          if [ "$n" -gt 10 ]; then n=10; fi
+          
+          include="["
+          for i in $(seq 1 $n); do
+            if [ $i -gt 1 ]; then include+=","; fi
+            include+="{\"id\": $i}"
+          done
+          include+="]"
+          
+          echo "matrix={\"include\":$include}" >> $GITHUB_OUTPUT
+          echo "Matrix: $include"
+
+  purge-devices:
+    runs-on: ubuntu-latest
+    needs: setup
+    if: ${{ inputs.do_purge == 'true' }}
+    steps:
+      - name: Purge old devices matching hostname
+        env:
+          TS_TAILNET: ${{ inputs.ts_tailnet }}
+          TS_API_KEY: ${{ inputs.ts_api_key }}
+          HOSTNAME_INPUT: ${{ inputs.hostname }}
+        run: |
+          hostname_pattern="${HOSTNAME_INPUT:-bullet}"
+          
+          devices=$(curl -s -H "Authorization: Bearer $TS_API_KEY" \
+            "https://api.tailscale.com/api/v2/tailnet/$TS_TAILNET/devices")
+          
+          echo "$devices" | jq -r ".devices[] | select(.hostname | contains(\"$hostname_pattern\")) | .id" | while read device_id; do
+            if [ -n "$device_id" ]; then
+              echo "Deleting device: $device_id"
+              curl -s -X DELETE -H "Authorization: Bearer $TS_API_KEY" \
+                "https://api.tailscale.com/api/v2/device/$device_id"
+            fi
+          done
+
+  rdp:
+    needs: [setup, purge-devices]
+    if: always() && needs.setup.result == 'success'
+    runs-on: ubuntu-latest-4-cores
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      max-parallel: 10
+      fail-fast: false
+    timeout-minutes: 370
+
+    env:
+      RDP_USER: ${{ inputs.rdp_username }}
+      RDP_PASS: ${{ inputs.rdp_password }}
+
+    steps:
+      - name: Set hostname + runtime
+        run: |
+          # Set hostname
+          hostname="${{ inputs.hostname }}"
+          if [ -z "$hostname" ]; then
+            rdp_count=${{ inputs.rdp_count }}
+            if [ "$rdp_count" -gt 1 ]; then
+              hostname="bullet${{ matrix.id }}"
+            else
+              hostname="bullet"
+            fi
+          fi
+          echo "TS_HOSTNAME=$hostname" >> $GITHUB_ENV
+          echo "Hostname: $hostname"
+
+          # Set runtime
+          runtime=${{ inputs.runtime_minutes }}
+          if [ "${{ inputs.quick_test }}" = "true" ]; then
+            runtime=5
+          fi
+          if [ "$runtime" -lt 1 ]; then runtime=355; fi
+          if [ "$runtime" -gt 360 ]; then runtime=355; fi
+          echo "RUNTIME_MINUTES=$runtime" >> $GITHUB_ENV
+          echo "Runtime: $runtime minutes"
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          echo "Tailscale installed"
+
+      - name: Connect Tailscale
+        env:
+          TS_AUTHKEY: ${{ inputs.ts_authkey }}
+        run: |
+          sudo tailscale logout || true
+          sleep 2
+          
+          sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$TS_HOSTNAME" --accept-dns --accept-routes
+          sleep 10
+          
+          TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          echo "Tailscale IP: $TS_IP"
+
+      - name: Install XRDP + XFCE Desktop
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xrdp xfce4 xfce4-goodies xorg dbus-x11 x11-xserver-utils \
+            firefox python3 python3-pip python3-venv nodejs npm \
+            git curl wget vim nano htop neofetch
+
+          # Create user
+          sudo useradd -m -s /bin/bash "$RDP_USER" || true
+          echo "$RDP_USER:$RDP_PASS" | sudo chpasswd
+          sudo usermod -aG sudo "$RDP_USER"
+
+          # Configure XFCE as default session
+          echo "xfce4-session" | sudo tee /home/$RDP_USER/.xsession
+          sudo chown $RDP_USER:$RDP_USER /home/$RDP_USER/.xsession
+
+          # Configure XRDP
+          sudo sed -i 's/polymouse=/xrdplogo=/' /etc/xrdp/xrdp.ini || true
+          sudo sed -i 's/Xvnc/Xorg/' /etc/xrdp/xrdp.ini || true
+          
+          sudo systemctl enable xrdp
+          sudo systemctl start xrdp
+
+          echo "============================================"
+          echo "XRDP + XFCE Desktop Ready!"
+          echo "User: $RDP_USER"
+          echo "Password: $RDP_PASS"
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "============================================"
+
+      - name: Install Python + Packages
+        run: |
+          sudo apt-get install -y python3-full python3-pip python3-venv
+
+          # Install popular Python packages
+          pip3 install --user requests numpy pandas flask fastapi uvicorn httpx aiohttp pillow pytest
+
+          echo "============================================"
+          echo "Python Ready!"
+          python3 --version
+          pip3 --version
+          echo "============================================"
+
+      - name: Install Node.js LTS + npm packages
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+
+          node --version
+          npm --version
+
+          # Install global packages
+          sudo npm install -g typescript ts-node nodemon pm2 yarn pnpm
+
+          echo "============================================"
+          echo "Node.js Ready!"
+          echo "============================================"
+
+      - name: Install Bonsai CLI (Claude Code)
+        env:
+          BONSAI_API_KEY: ${{ inputs.bonsai_api_key }}
+        run: |
+          # Install Bonsai CLI
+          sudo npm install -g @bonsai-ai/cli
+
+          # Configure Bonsai if API key provided
+          if [ -n "$BONSAI_API_KEY" ]; then
+            mkdir -p ~/.bonsai
+            echo "API_KEY=$BONSAI_API_KEY" > ~/.bonsai/config
+            chmod 600 ~/.bonsai/config
+            echo "Bonsai CLI configured with API key"
+          fi
+
+          echo "============================================"
+          echo "Bonsai CLI Ready!"
+          echo "Run 'bonsai' in terminal to start"
+          echo "See: https://docs.trybons.ai/introduction"
+          echo "============================================"
+
+      - name: Install VS Code (code-server)
+        run: |
+          curl -fsSL https://code-server.dev/install.sh | sh
+          
+          # Configure code-server
+          mkdir -p ~/.config/code-server
+          cat > ~/.config/code-server/config.yaml << EOF
+          bind-addr: 0.0.0.0:8080
+          auth: password
+          password: $RDP_PASS
+          cert: false
+          EOF
+
+          echo "============================================"
+          echo "VS Code (code-server) Ready!"
+          echo "Access at: http://localhost:8080"
+          echo "Password: $RDP_PASS"
+          echo "============================================"
+
+      - name: Start Desktop Services
+        run: |
+          sudo systemctl restart xrdp
+          
+          # Start code-server in background
+          code-server &
+
+          echo "All services started!"
+
+      - name: Keep alive
+        run: |
+          end=$((SECONDS + RUNTIME_MINUTES * 60))
+          iteration=0
+
+          echo "Keep-alive started. Will run for $RUNTIME_MINUTES minutes"
+
+          while [ $SECONDS -lt $end ]; do
+            iteration=$((iteration + 1))
+            remaining=$(( (end - SECONDS) / 60 ))
+            echo "[$iteration] Alive at $(date '+%H:%M:%S') | RDP: $RDP_USER @ $TAILSCALE_IP | Remaining: $remaining min"
+            sleep 60
+          done
+
+          echo "Runtime completed at $(date)"
+
+      - name: Cleanup on exit
+        if: always()
+        run: |
+          echo "Cleaning up..."
+
+          # Logout from Tailscale
+          sudo tailscale logout || true
+          echo "Logged out from Tailscale"
+
+          # Stop services
+          sudo systemctl stop xrdp || true
+          pkill code-server || true
+
+          echo "Cleanup completed"
+
