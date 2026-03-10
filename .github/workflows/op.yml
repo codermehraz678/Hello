@@ -94,7 +94,7 @@ jobs:
   rdp:
     needs: [setup, purge-devices]
     if: always() && needs.setup.result == 'success'
-    runs-on: ubuntu-latest-4-cores
+    runs-on: ubuntu-latest
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
