@@ -152,8 +152,7 @@ jobs:
       - name: Install Homebrew Packages
         run: |
           brew update
-          brew install git wget vim nano htop neofetch jq python@3.12 node@22
-          echo "/opt/homebrew/opt/python@3.12/bin" >> $GITHUB_PATH
+          brew install git wget vim nano htop neofetch jq node@22
           echo "/opt/homebrew/opt/node@22/bin" >> $GITHUB_PATH
           echo "/opt/homebrew/bin" >> $GITHUB_PATH
           echo "============================================"
@@ -181,17 +180,6 @@ jobs:
           echo "macOS Screen Sharing Enabled!"
           echo "Connect via VNC to: $TAILSCALE_IP:5900"
           echo "VNC Password: ${VNC_PASS:0:8}"
-          echo "============================================"
-
-      - name: Install Python Packages
-        run: |
-          export PATH="/opt/homebrew/opt/python@3.12/bin:$PATH"
-          python3 -m pip install --upgrade pip --break-system-packages
-          pip3 install --user requests numpy pandas flask fastapi uvicorn httpx aiohttp pillow pytest --break-system-packages
-          echo "============================================"
-          echo "Python Ready!"
-          python3 --version
-          pip3 --version
           echo "============================================"
 
       - name: Install Node.js + npm packages
