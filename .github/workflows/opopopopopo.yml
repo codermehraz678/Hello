@@ -152,9 +152,10 @@ jobs:
       - name: Install Homebrew Packages
         run: |
           brew update
-          brew install git wget vim nano htop neofetch jq tigervnc python@3.12 node@22
+          brew install git wget vim nano htop neofetch jq python@3.12 node@22
           echo "/opt/homebrew/opt/python@3.12/bin" >> $GITHUB_PATH
           echo "/opt/homebrew/opt/node@22/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/bin" >> $GITHUB_PATH
           echo "============================================"
           echo "Homebrew packages installed!"
           echo "============================================"
@@ -168,23 +169,6 @@ jobs:
             echo "Created user: $RDP_USER"
           fi
           id "$RDP_USER"
-
-      - name: Install and Configure VNC
-        run: |
-          export PATH="/opt/homebrew/bin:$PATH"
-          mkdir -p ~/.vnc
-          vnc_pass="${VNC_PASS:0:8}"
-          if command -v vncpasswd &>/dev/null; then
-            printf '%s\n' "$vnc_pass" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null
-          else
-            brew install expect
-            /usr/bin/expect -c 'spawn vncpasswd; expect "Password:"; send "'"$vnc_pass"'\\r"; expect "Verify:"; send "'"$vnc_pass"'\\r"; expect eof'
-          fi
-          chmod 600 ~/.vnc/passwd
-          echo "============================================"
-          echo "VNC Server Configured!"
-          echo "VNC Password: ${VNC_PASS:0:8}"
-          echo "============================================"
 
       - name: Enable macOS Screen Sharing
         run: |
@@ -250,17 +234,14 @@ jobs:
           echo "Password: $RDP_PASS"
           echo "============================================"
 
-      - name: Start VNC and Services
+      - name: Start Services
         run: |
-          export PATH="/opt/homebrew/bin:$PATH"
-          vncserver :1 -geometry 1920x1080 -depth 24 2>/dev/null || echo "TigerVNC startup attempted"
           code-server &
           echo "============================================"
           echo "All Services Started!"
           echo ""
           echo "Connection Info:"
-          echo "  VNC (TigerVNC): $TAILSCALE_IP:5901"
-          echo "  Screen Sharing: $TAILSCALE_IP:5900 (macOS built-in)"
+          echo "  Screen Sharing (VNC): $TAILSCALE_IP:5900"
           echo "  VS Code: http://$TAILSCALE_IP:8080"
           echo ""
           echo "User: $RDP_USER"
@@ -288,8 +269,6 @@ jobs:
           export PATH="/opt/homebrew/bin:$PATH"
           sudo tailscale logout 2>/dev/null || true
           echo "Logged out from Tailscale"
-          vncserver -kill :1 2>/dev/null || true
           pkill code-server 2>/dev/null || true
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop 2>/dev/null || true
           echo "Cleanup completed"
-
