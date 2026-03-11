@@ -186,8 +186,8 @@ jobs:
       - name: Install Python Packages
         run: |
           export PATH="/opt/homebrew/opt/python@3.12/bin:$PATH"
-          python3 -m pip install --upgrade pip
-          pip3 install --user requests numpy pandas flask fastapi uvicorn httpx aiohttp pillow pytest
+          python3 -m pip install --upgrade pip --break-system-packages
+          pip3 install --user requests numpy pandas flask fastapi uvicorn httpx aiohttp pillow pytest --break-system-packages
           echo "============================================"
           echo "Python Ready!"
           python3 --version
