@@ -1,4 +1,4 @@
-name: RDP + Tailscale + Dev Environment (macOS)
+name: RDP + macos
 
 on:
   workflow_dispatch:
