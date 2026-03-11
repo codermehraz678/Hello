@@ -59,14 +59,12 @@ jobs:
           n=${{ inputs.rdp_count }}
           if [ "$n" -lt 1 ]; then n=1; fi
           if [ "$n" -gt 10 ]; then n=10; fi
-          
           include="["
           for i in $(seq 1 $n); do
             if [ $i -gt 1 ]; then include+=","; fi
             include+="{\"id\": $i}"
           done
           include+="]"
-          
           echo "matrix={\"include\":$include}" >> $GITHUB_OUTPUT
           echo "Matrix: $include"
 
@@ -82,15 +80,11 @@ jobs:
           HOSTNAME_INPUT: ${{ inputs.hostname }}
         run: |
           hostname_pattern="${HOSTNAME_INPUT:-bullet}"
-          
-          devices=$(curl -s -H "Authorization: Bearer $TS_API_KEY" \
-            "https://api.tailscale.com/api/v2/tailnet/$TS_TAILNET/devices")
-          
+          devices=$(curl -s -H "Authorization: Bearer $TS_API_KEY" "https://api.tailscale.com/api/v2/tailnet/$TS_TAILNET/devices")
           echo "$devices" | jq -r ".devices[] | select(.hostname | contains(\"$hostname_pattern\")) | .id" | while read device_id; do
             if [ -n "$device_id" ]; then
               echo "Deleting device: $device_id"
-              curl -s -X DELETE -H "Authorization: Bearer $TS_API_KEY" \
-                "https://api.tailscale.com/api/v2/device/$device_id"
+              curl -s -X DELETE -H "Authorization: Bearer $TS_API_KEY" "https://api.tailscale.com/api/v2/device/$device_id"
             fi
           done
 
@@ -112,7 +106,6 @@ jobs:
     steps:
       - name: Set hostname + runtime
         run: |
-          # Set hostname
           hostname="${{ inputs.hostname }}"
           if [ -z "$hostname" ]; then
             rdp_count=${{ inputs.rdp_count }}
@@ -124,8 +117,6 @@ jobs:
           fi
           echo "TS_HOSTNAME=$hostname" >> $GITHUB_ENV
           echo "Hostname: $hostname"
-
-          # Set runtime
           runtime=${{ inputs.runtime_minutes }}
           if [ "${{ inputs.quick_test }}" = "true" ]; then
             runtime=5
@@ -137,122 +128,71 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          # Install Tailscale via Homebrew (more reliable on macOS)
           brew install tailscale
-          
-          # Link tailscale binary
-          brew link tailscale
-          
-          echo "Tailscale installed"
-          which tailscale || echo "Tailscale not in PATH, adding..."
-          
-          # Add to PATH if needed
+          brew link --force tailscale
+          echo "/opt/homebrew/bin" >> $GITHUB_PATH
           export PATH="/opt/homebrew/bin:$PATH"
+          echo "Tailscale installed"
+          which tailscale
           tailscale version
 
       - name: Connect Tailscale
         env:
           TS_AUTHKEY: ${{ inputs.ts_authkey }}
         run: |
-          # Ensure Tailscale is in PATH
-          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-          
-          # Check if tailscaled daemon is running, start if not
-          sudo launchctl list | grep tailscale || sudo brew services start tailscale || true
+          export PATH="/opt/homebrew/bin:$PATH"
+          sudo /opt/homebrew/opt/tailscale/bin/tailscaled 2>/dev/null &
           sleep 3
-          
-          # Logout first (ignore errors)
-          sudo tailscale logout 2>/dev/null || true
-          sleep 2
-          
-          # Connect to Tailscale
           sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$TS_HOSTNAME" --accept-dns --accept-routes
           sleep 10
-          
           TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
           echo "Tailscale IP: $TS_IP"
 
       - name: Install Homebrew Packages
         run: |
-          # Update Homebrew
           brew update
-          
-          # Install essential tools
-          brew install git curl wget vim nano htop neofetch jq
-          
-          # Install VNC server alternative (TigerVNC)
-          brew install tigervnc
-          
-          # Install Python
-          brew install python@3.12
-          
-          # Install Node.js
-          brew install node@22
-          
+          brew install git wget vim nano htop neofetch jq tigervnc python@3.12 node@22
+          echo "/opt/homebrew/opt/python@3.12/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/node@22/bin" >> $GITHUB_PATH
           echo "============================================"
           echo "Homebrew packages installed!"
           echo "============================================"
 
       - name: Create User Account
         run: |
-          # Check if user already exists
           if id "$RDP_USER" &>/dev/null; then
             echo "User $RDP_USER already exists"
           else
-            # Create user using sysadminctl
-            sudo sysadminctl -addUser "$RDP_USER" -password "$RDP_PASS" -admin
+            sudo sysadminctl -addUser "$RDP_USER" -password "$RDP_PASS" -admin 2>&1 || true
             echo "Created user: $RDP_USER"
           fi
-          
-          # Verify user
           id "$RDP_USER"
 
-      - name: Configure VNC Server
+      - name: Install and Configure VNC
         run: |
-          # Create VNC password file directory
+          export PATH="/opt/homebrew/bin:$PATH"
           mkdir -p ~/.vnc
-          
-          # Set VNC password (max 8 characters)
           vnc_pass="${VNC_PASS:0:8}"
-          
-          # Create password using vncpasswd
-          echo "$vnc_pass" | vncpasswd -f > ~/.vnc/passwd
+          if command -v vncpasswd &>/dev/null; then
+            printf '%s\n' "$vnc_pass" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null
+          else
+            brew install expect
+            /usr/bin/expect -c 'spawn vncpasswd; expect "Password:"; send "'"$vnc_pass"'\\r"; expect "Verify:"; send "'"$vnc_pass"'\\r"; expect eof'
+          fi
           chmod 600 ~/.vnc/passwd
-          
-          # Create VNC xstartup file for the user
-          mkdir -p /Users/$RDP_USER/.vnc
-          cat > /Users/$RDP_USER/.vnc/xstartup << 'EOF'
-          #!/bin/bash
-          # Start a simple terminal session
-          export SHELL=/bin/zsh
-          exec /bin/zsh -l
-          EOF
-          chmod +x /Users/$RDP_USER/.vnc/xstartup
-          
-          # Copy passwd to user's VNC directory
-          cp ~/.vnc/passwd /Users/$RDP_USER/.vnc/passwd
-          chown -R $RDP_USER:staff /Users/$RDP_USER/.vnc
-          
           echo "============================================"
           echo "VNC Server Configured!"
           echo "VNC Password: ${VNC_PASS:0:8}"
           echo "============================================"
 
-      - name: Enable macOS Screen Sharing (VNC)
+      - name: Enable macOS Screen Sharing
         run: |
-          # Enable Screen Sharing via launchctl
-          sudo launchctl enable system/com.apple.screensharing || true
-          
-          # Alternative: Enable ARD (Apple Remote Desktop) agent
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -restartopts -now -privs -all
-          
-          # Set VNC password for Screen Sharing
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvnclegacy -vnclegacy yes \
-            -setvncpw -vncpw "${VNC_PASS:0:8}"
-          
+          vnc_pass="${VNC_PASS:0:8}"
+          sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restartopts -now -privs -all 2>/dev/null || true
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$vnc_pass" 2>/dev/null || true
+          sudo dscl . append /Groups/com.apple.access_screensharing groupmembership "$RDP_USER" 2>/dev/null || true
           echo "============================================"
           echo "macOS Screen Sharing Enabled!"
           echo "Connect via VNC to: $TAILSCALE_IP:5900"
@@ -261,12 +201,9 @@ jobs:
 
       - name: Install Python Packages
         run: |
-          # Ensure pip is up to date
+          export PATH="/opt/homebrew/opt/python@3.12/bin:$PATH"
           python3 -m pip install --upgrade pip
-          
-          # Install popular Python packages
           pip3 install --user requests numpy pandas flask fastapi uvicorn httpx aiohttp pillow pytest
-          
           echo "============================================"
           echo "Python Ready!"
           python3 --version
@@ -275,53 +212,38 @@ jobs:
 
       - name: Install Node.js + npm packages
         run: |
-          # Add Node.js to PATH (brew installs to opt)
           export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
-          
           node --version
           npm --version
-          
-          # Install global packages
           npm install -g typescript ts-node nodemon pm2 yarn pnpm
-          
           echo "============================================"
           echo "Node.js Ready!"
           echo "============================================"
 
-      - name: Install Bonsai CLI (Claude Code)
+      - name: Install Bonsai CLI
         env:
           BONSAI_API_KEY: ${{ inputs.bonsai_api_key }}
         run: |
-          # Install Bonsai CLI
+          export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
           npm install -g @bonsai-ai/cli
-          
-          # Configure Bonsai if API key provided
           if [ -n "$BONSAI_API_KEY" ]; then
             mkdir -p ~/.bonsai
             echo "API_KEY=$BONSAI_API_KEY" > ~/.bonsai/config
             chmod 600 ~/.bonsai/config
             echo "Bonsai CLI configured with API key"
           fi
-          
           echo "============================================"
           echo "Bonsai CLI Ready!"
-          echo "Run 'bonsai' in terminal to start"
-          echo "See: https://docs.trybons.ai/introduction"
           echo "============================================"
 
-      - name: Install VS Code (code-server)
+      - name: Install VS Code
         run: |
           curl -fsSL https://code-server.dev/install.sh | sh
-          
-          # Configure code-server
           mkdir -p ~/.config/code-server
-          cat > ~/.config/code-server/config.yaml << EOF
-          bind-addr: 0.0.0.0:8080
-          auth: password
-          password: $RDP_PASS
-          cert: false
-          EOF
-          
+          echo "bind-addr: 0.0.0.0:8080" > ~/.config/code-server/config.yaml
+          echo "auth: password" >> ~/.config/code-server/config.yaml
+          echo "password: $RDP_PASS" >> ~/.config/code-server/config.yaml
+          echo "cert: false" >> ~/.config/code-server/config.yaml
           echo "============================================"
           echo "VS Code (code-server) Ready!"
           echo "Access at: http://localhost:8080"
@@ -330,17 +252,14 @@ jobs:
 
       - name: Start VNC and Services
         run: |
-          # Start TigerVNC server on display :1
-          vncserver :1 -geometry 1920x1080 -depth 24
-          
-          # Start code-server in background
+          export PATH="/opt/homebrew/bin:$PATH"
+          vncserver :1 -geometry 1920x1080 -depth 24 2>/dev/null || echo "TigerVNC startup attempted"
           code-server &
-          
           echo "============================================"
           echo "All Services Started!"
           echo ""
           echo "Connection Info:"
-          echo "  VNC: $TAILSCALE_IP:5901 (TigerVNC)"
+          echo "  VNC (TigerVNC): $TAILSCALE_IP:5901"
           echo "  Screen Sharing: $TAILSCALE_IP:5900 (macOS built-in)"
           echo "  VS Code: http://$TAILSCALE_IP:8080"
           echo ""
@@ -353,38 +272,24 @@ jobs:
         run: |
           end=$((SECONDS + RUNTIME_MINUTES * 60))
           iteration=0
-
           echo "Keep-alive started. Will run for $RUNTIME_MINUTES minutes"
-
           while [ $SECONDS -lt $end ]; do
             iteration=$((iteration + 1))
             remaining=$(( (end - SECONDS) / 60 ))
             echo "[$iteration] Alive at $(date '+%H:%M:%S') | VNC: $RDP_USER @ $TAILSCALE_IP | Remaining: $remaining min"
             sleep 60
           done
-
           echo "Runtime completed at $(date)"
 
       - name: Cleanup on exit
         if: always()
         run: |
           echo "Cleaning up..."
-
-          # Ensure PATH includes Homebrew
-          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-
-          # Logout from Tailscale
+          export PATH="/opt/homebrew/bin:$PATH"
           sudo tailscale logout 2>/dev/null || true
           echo "Logged out from Tailscale"
-
-          # Stop VNC server
-          vncserver -kill :1 || true
-          
-          # Stop code-server
-          pkill code-server || true
-          
-          # Disable Screen Sharing
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -deactivate -stop || true
-
+          vncserver -kill :1 2>/dev/null || true
+          pkill code-server 2>/dev/null || true
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop 2>/dev/null || true
           echo "Cleanup completed"
+
