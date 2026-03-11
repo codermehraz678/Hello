@@ -1,4 +1,4 @@
-name: RDP + macos
+name: RDP + Tailscale + Dev Environment (macOS)
 
 on:
   workflow_dispatch:
@@ -137,16 +137,35 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+          # Install Tailscale via Homebrew (more reliable on macOS)
+          brew install tailscale
+          
+          # Link tailscale binary
+          brew link tailscale
+          
           echo "Tailscale installed"
+          which tailscale || echo "Tailscale not in PATH, adding..."
+          
+          # Add to PATH if needed
+          export PATH="/opt/homebrew/bin:$PATH"
+          tailscale version
 
       - name: Connect Tailscale
         env:
           TS_AUTHKEY: ${{ inputs.ts_authkey }}
         run: |
-          sudo tailscale logout || true
+          # Ensure Tailscale is in PATH
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          
+          # Check if tailscaled daemon is running, start if not
+          sudo launchctl list | grep tailscale || sudo brew services start tailscale || true
+          sleep 3
+          
+          # Logout first (ignore errors)
+          sudo tailscale logout 2>/dev/null || true
           sleep 2
           
+          # Connect to Tailscale
           sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$TS_HOSTNAME" --accept-dns --accept-routes
           sleep 10
           
@@ -351,8 +370,11 @@ jobs:
         run: |
           echo "Cleaning up..."
 
+          # Ensure PATH includes Homebrew
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
           # Logout from Tailscale
-          sudo tailscale logout || true
+          sudo tailscale logout 2>/dev/null || true
           echo "Logged out from Tailscale"
 
           # Stop VNC server
